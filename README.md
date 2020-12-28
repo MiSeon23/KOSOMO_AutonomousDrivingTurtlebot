@@ -18,7 +18,8 @@
 
 ---
 rqt_graph
-##### be going to add the picture 
+
+![rosgraph](https://user-images.githubusercontent.com/52205441/103195723-2ac3ec00-4926-11eb-95e8-4bbd5de123df.png)
 
 
 hardware picture
