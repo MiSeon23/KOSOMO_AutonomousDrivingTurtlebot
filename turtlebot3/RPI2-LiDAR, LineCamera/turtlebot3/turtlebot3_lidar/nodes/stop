@@ -1,0 +1,68 @@
+#!/usr/bin/env python
+
+
+import rospy
+import math
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import Twist
+import numpy as np
+
+OBSTACLE_FLAG = 2
+FINISH_FLAG = 20
+STOP_DISTANCE = 0.25
+flag = 0
+
+class Stop():
+    def __init__(self):
+        self._cmd_pub = rospy.Publisher('cmd_vel', Twist, queue_size=1)
+        self._finish_pub = rospy.Publisher('finishFlag', Twist, queue_size=1)
+
+    def get_scan(self):
+        scan = rospy.wait_for_message('scan', LaserScan)
+        detect = np.array([])
+        samples = len(scan.ranges)
+    
+        for i in range(samples):         
+            if scan.ranges[i] == float('Inf'):
+                scan.ranges[i] = 3.5                     
+            if i > 150 and i < 210:              
+                detect = np.append(detect, scan.ranges[i])
+
+        return distance
+
+
+    def stop(self):
+        twist = Twist()
+        global flag
+        while not rospy.is_shutdown():
+            sign = rospy.wait_for_message('obstacleInfo', Twist)
+            if sign.linear.y == OBSTACLE_FLAG:
+                flag = 1
+                continue
+            if flag == 1:
+                front_dis = self.get_scan()
+                if front_dis.sum() < 0.1:
+                    front_min = 0
+                else:
+                    front_min = np.min(front_dis[front_dis>0])
+
+                if 0 < front_min < STOP_DISTANCE:
+                    twist.linear.x = 0.0
+                    twist.angular.z = 0.0
+                    self._cmd_pub.publish(twist)
+                    rospy.loginfo("!!! FINISH !!!")
+                    twist.linear.y = FINISH_FLAG
+                    self._finish_pub.publish(twist)
+                    break
+
+
+if __name__ == '__main__':
+    rospy.init_node('stop')
+    twist = Twist()
+    try:
+        final = Stop()
+        final.stop()
+
+    except rospy.ROSInterruptException:
+        pass
+

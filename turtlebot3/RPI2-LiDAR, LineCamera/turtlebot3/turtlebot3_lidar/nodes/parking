@@ -1,0 +1,196 @@
+#!/usr/bin/env python
+
+import rospy
+import math
+import time
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import Twist
+import numpy as np
+
+# pub / sub to main
+START_PARK = 3
+FINISH_PARK = 4
+
+LINEAR_VEL = -0.1
+TURN_ANGLE = 3
+
+STOP_DISTANCE = 0.33
+PARKING_DISTANCE = 0.21 
+LIDAR_ERROR = 0.05
+OUT_DIS = 0.3
+ROTATE = 270
+OUT_ROTATE = 255
+
+park_area = 100
+flag = 0
+FLAG = 0
+count = 0
+
+class Parking():
+    def __init__(self):
+        self._cmd_pub = rospy.Publisher('cmd_vel', Twist, queue_size=1)
+        self._park_pub = rospy.Publisher('parkingFlag', Twist, queue_size=1)
+        
+    def get_scan(self):
+        scan = rospy.wait_for_message('scan', LaserScan)
+        right = np.array([])
+        left = np.array([])
+        front = np.array([])
+        back = np.array([])
+       
+        samples = len(scan.ranges)  # The number of samples is defined in 
+                                    # turtlebot3_<model>.gazebo.xacro file,
+                                    # the default is 360.
+
+        for i in range(samples):
+            if scan.ranges[i] == float('Inf'):
+                scan.ranges[i] = 3.5
+            elif math.isnan(scan.ranges[i]):
+                scan.ranges[i] = 100
+            
+            if i > 70 and i < 120:
+                left = np.append(left, scan.ranges[i])
+            elif i > 250 and i < 290:
+                right = np.append(right, scan.ranges[i])
+            elif i <= 190 and i >= 170:
+                front = np.append(front, scan.ranges[i])    
+            elif i <= 20 or i >= 340:
+                back = np.append(back, scan.ranges[i])
+        
+        return front, right, left, back
+
+#################### rotate 90 degree ####################
+    def rotate(self, direction):
+        twist = Twist()
+        if direction == 1:
+            for i in range(ROTATE):
+                twist.linear.x = 0.0
+                twist.angular.z = TURN_ANGLE
+                self._cmd_pub.publish(twist)
+                rospy.loginfo("direction 1 %d" %i)
+            return 0
+        else:
+            for i in range(ROTATE):
+                twist.linear.x = 0.0
+                twist.angular.z = -TURN_ANGLE
+                self._cmd_pub.publish(twist)
+                rospy.loginfo("direction 0 %d" %i)
+
+            return 1          
+
+    def out_rotate(self, direction):
+        twist = Twist()
+        if direction == 1:
+            for i in range(OUT_ROTATE):
+                twist.linear.x = LINEAR_VEL
+                twist.angular.z = TURN_ANGLE
+                self._cmd_pub.publish(twist)
+                rospy.loginfo("out %d" %i)
+        else:
+            for i in range(OUT_ROTATE):
+                twist.linear.x = LINEAR_VEL
+                twist.angular.z = -TURN_ANGLE
+                self._cmd_pub.publish(twist)
+                rospy.loginfo("out %d" %i)
+        return 3
+
+
+#################### two-sided distance judgment ####################
+    def loc_detect(self):
+        _, right_dis, left_dis, _ = self.get_scan()
+        if np.min(right_dis[right_dis>0]) < np.min(left_dis[left_dis>0]):
+            direction = 1   # obstacle right
+            rospy.loginfo("Left space is empty")
+        else:
+            direction = 0   # obstacle left
+            rospy.loginfo("Right space is empty")
+        return direction
+
+
+    def parking(self):
+        twist = Twist()
+        global flag
+        global FLAG
+        global count
+        out = -1
+        while(True):
+            sign = rospy.wait_for_message('parkingInfo', Twist)
+            if sign.linear.y == START_PARK:
+                FLAG = 1
+                break
+
+        while (not rospy.is_shutdown()) and FLAG == 1:
+            front_dis, _, _, back_dis = self.get_scan()
+
+            if front_dis.sum() < 0.1:
+                front_min = 0
+            else:
+                front_min = np.min(front_dis[front_dis>0])
+            if back_dis.sum() < 0.1:
+                back_min = 0
+            else:
+                back_min = np.min(back_dis[back_dis>0])         
+
+            if flag == 0 and front_min > STOP_DISTANCE:
+                twist.linear.x = LINEAR_VEL
+                twist.angular.z = 0.0
+                self._cmd_pub.publish(twist)
+
+#################### Ready to park ####################
+            elif (front_min < STOP_DISTANCE) and flag == 0:
+                twist.linear.x = 0.0
+                twist.angular.z = 0.0 
+                self._cmd_pub.publish(twist)
+                rospy.loginfo('Ready to park!')
+                global park_area
+                park_area = self.loc_detect()
+                out = self.rotate(park_area)
+                flag = 1
+
+
+
+#################### turtlebot enters the park area ####################
+            if (back_min < PARKING_DISTANCE) and flag == 1:
+                flag = 2
+                twist.linear.x = 0.0
+                twist.angular.z = 0.0
+                self._cmd_pub.publish(twist)
+                time.sleep(5)
+            elif flag == 1 and back_min > PARKING_DISTANCE:
+                twist.linear.x = -LINEAR_VEL
+                twist.angular.z = 0.0
+                self._cmd_pub.publish(twist)
+
+#################### Out of park area ####################
+            if back_min < OUT_DIS and flag == 2:
+                twist.linear.x = LINEAR_VEL
+                twist.angular.z = 0.0
+                self._cmd_pub.publish(twist)
+            elif flag == 2:
+                flag = self.out_rotate(park_area)
+                           
+#################### Ready to go staight( Finish!! ) ####################
+            if flag == 3:
+                for i in range(2700):
+                    twist.linear.x = LINEAR_VEL
+                    twist.angular.z = 0.0
+                    self._cmd_pub.publish(twist)
+                    rospy.loginfo("Go straight %d" %i)
+                rospy.loginfo('The parking is finished!')
+                for i in range(4200):
+                    twist.linear.x = -0.07
+                    twist.angular.z = 0.4
+                    self._cmd_pub.publish(twist)
+                twist.linear.y = FINISH_PARK
+                self._park_pub.publish(twist)
+                break
+        
+
+if __name__ == '__main__':
+    rospy.init_node('parking')
+    try:
+        park = Parking()
+        rospy.loginfo("Before parking")
+        park.parking()       
+    except rospy.ROSInterruptException:
+        pass

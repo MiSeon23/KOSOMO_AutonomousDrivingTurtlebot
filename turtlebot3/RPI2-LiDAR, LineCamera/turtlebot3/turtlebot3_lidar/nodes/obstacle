@@ -1,0 +1,188 @@
+#!/usr/bin/env python
+
+
+import rospy
+import math
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import Twist
+import numpy as np
+import time
+
+# pub / sub to main
+START_OBSTACLE = 1
+FINISH_OBSTACLE = 2
+RIGHT_SIGNAL = 6
+LINEDETECT_MODE = 0
+GO_FLAG = 1000
+
+LINEAR_VEL = -0.1 # linear x value
+ANGULAR_VEL = 55 # rotate z value
+
+reference_STOP = 0.2 # radius in 0~360 ranges
+
+# obstacle1, 2
+reference_RIGHT = 0.24 # turn right, threshold 5cm
+reference_LEFT = 0.2 # After straight, turn left threshold 10cm
+
+ANGLE1 = 300    # After stop, using when obstacle1
+ANGLE2 = 60     # After stop, using when obstacle2
+flag = -1
+GO_FLAG = False
+a = 0
+
+class Obstacle():
+    def __init__(self):
+        self._cmd_pub = rospy.Publisher('cmd_vel', Twist, queue_size=1)
+        self._obs_pub = rospy.Publisher('obstacleFlag', Twist, queue_size=1)
+
+    def get_scan(self):
+        scan = rospy.wait_for_message('scan', LaserScan)
+        detect = np.array([])
+        distance = np.array([])
+        left1 = np.array([])
+        prac = np.array([])
+        samples = len(scan.ranges)
+    
+        for i in range(samples):         
+            if scan.ranges[i] == float('Inf'):
+                scan.ranges[i] = 3.5           
+            elif math.isnan(scan.ranges[i]):   
+                scan.ranges[i] = 100           
+            if i > 150 and i < 210:              
+                detect = np.append(detect, scan.ranges[i])
+            elif i > (ANGLE1-1) and i < (ANGLE1+1):
+                left = np.append(left1, scan.ranges[i])
+            elif i > (ANGLE2-1) and i < (ANGLE2+1):
+                right = np.append(left1, scan.ranges[i])
+            distance = np.append(distance, scan.ranges[i])
+            if 225 < i < 255:
+                prac = np.append(prac, scan.ranges[i])
+
+        return distance, detect, left, right, prac
+
+
+    def obstacle_prac(self):
+        twist = Twist()
+        global flag
+        global GO_FLAG
+        global a
+        while(True):
+            sign = rospy.wait_for_message('obstacleInfo', Twist)
+            if sign.linear.y == RIGHT_SIGNAL:
+                GO_FLAG = True
+                break
+        while (not rospy.is_shutdown()) and GO_FLAG == True:
+            dis, _, _, _, prac = self.get_scan()
+            if prac.sum() < 0.1:
+                min_prac = 0
+            else:
+                min_prac = np.min(prac[prac>0])
+            if dis.sum() < 0.1:
+                min_dis = 0
+            else:
+                min_dis = np.min(dis[dis>0])
+
+            if 0.3 < min_dis < 1.0:
+                a = 1
+            if a == 1:
+                twist.linear.y = START_OBSTACLE
+                self._obs_pub.publish(twist)
+                if 0.26 < min_prac < 0.5:
+                    rospy.loginfo("angular = 0.2")
+                    twist.linear.x = -0.08
+                    twist.angular.z = 0.2
+
+                    self._cmd_pub.publish(twist)
+                elif 0.2 < min_prac <= 0.26:
+                    rospy.loginfo("break")
+                    twist.linear.x = 0.0
+                    twist.angular.z = 0.0
+                    self._cmd_pub.publish(twist)
+                    flag = 2
+                    break
+                else:
+                    rospy.loginfo("linear = 0.06")
+                    twist.linear.x = -0.07
+                    twist.angular.z = 0.0
+                    self._cmd_pub.publish(twist)
+
+
+    def obstacle2(self):
+        twist = Twist()
+        global flag 
+        while not rospy.is_shutdown():
+            twist.linear.y = START_OBSTACLE
+            self._obs_pub.publish(twist)
+            lidar_distances, forward_distances, _, right, _ = self.get_scan()
+                
+            if lidar_distances.sum() < 0.1:
+                min_lidar = 0
+            else:
+                min_lidar = np.min(lidar_distances[lidar_distances>0])
+            if forward_distances.sum() < 0.1:
+                min_detect = 0
+            else:
+                min_detect = np.min(forward_distances[forward_distances>0]) 
+                
+            if (min_detect <= reference_LEFT + 0.0) and flag == 2:
+                twist.linear.x = 0.0
+                twist.angular.z = ANGULAR_VEL
+                self._cmd_pub.publish(twist)
+                rospy.loginfo('Left rotate : %f <= %f', min_detect, reference_LEFT)
+                time.sleep(2)
+                for i in range(800):
+                    twist.linear.x = LINEAR_VEL
+                    twist.angular.z = 0.0
+                    self._cmd_pub.publish(twist)
+                flag = 4
+
+            twist.linear.x = LINEAR_VEL
+            twist.angular.z = 0.0
+            self._cmd_pub.publish(twist)
+                    
+            avg_right = np.mean(right)
+            rospy.loginfo('avg_right : x = %f',avg_right) 
+            if (0.184 < avg_right <= reference_RIGHT + 0.05) and flag == 3:
+                twist.linear.x = 0.0
+                twist.angular.z = -ANGULAR_VEL
+                self._cmd_pub.publish(twist)
+                rospy.loginfo('Right rotate : %f <= %f', avg_right, reference_RIGHT)
+                time.sleep(2)
+                flag = 4
+
+            if (min_lidar >= reference_STOP) and flag == 4:
+                twist.linear.y = FINISH_OBSTACLE
+                self._obs_pub.publish(twist)
+                rospy.loginfo("FINISH")
+                break
+
+            else:
+                twist.linear.x = LINEAR_VEL
+                twist.angular.z = 0.0
+                self._cmd_pub.publish(twist)
+                rospy.loginfo('Distance of the obstacle : %f', min_detect)
+
+
+if __name__ == '__main__':
+    rospy.init_node('obstacle')
+    twist = Twist()
+    try:
+        obstacle = Obstacle()       
+        obstacle.obstacle_prac()
+        rospy.loginfo("Avoid the first obstacle!!")
+        for i in range(100):
+            twist.linear.x = LINEAR_VEL
+            twist.angular.z = 0.0
+            obstacle._cmd_pub.publish(twist)
+        obstacle.obstacle2()
+        for i in range(500):
+            twist.linear.x = LINEAR_VEL
+            twist.angular.z = 0.0
+            obstacle._cmd_pub.publish(twist)
+        for i in range(2300):
+            twist.linear.x = 0.065
+            twist.angular.z = 0.31
+            obstacle._cmd_pub.publish(twist)
+    except rospy.ROSInterruptException:
+        pass
+
